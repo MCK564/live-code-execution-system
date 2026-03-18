@@ -1,0 +1,98 @@
+version: "3.8"
+
+services:
+
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    restart: always
+    environment:
+      POSTGRES_DB: code_execution
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: 123456
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./volume/postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d code_execution"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - app-network
+
+
+  redis:
+    image: redis:7
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./volume/redis_data:/data
+    command: ["redis-server","--appendonly","yes"]
+    networks:
+      - app-network
+
+
+  fastapi-app:
+    build: ./app
+    container_name: fastapi-code-execution
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./app/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./app:/app
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0
+      --port 8001
+      --reload
+    networks:
+      - app-network
+
+
+
+  worker:
+    build: ./app
+    container_name: execution-worker
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./app:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: python core/worker.py
+    networks:
+      - app-network
+
+#  judge0:
+#    image: judge0/judge0:latest
+#    ports:
+#      - "2358:2358"
+#    networks:
+#      - app-network
+
+
+networks:
+  app-network:
+    driver: bridge
