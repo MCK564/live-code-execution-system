@@ -8,6 +8,8 @@ volume/
 pytest-cache-files-i99vctzt
 pytest-cache-files-it2_g3iv
 
+*.docx
+*.pdf
 *.so
 UI/
 test-results.txt

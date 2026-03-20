@@ -2,6 +2,25 @@
 
 Backend take-home assignment implementation for a live coding feature inside a Job Simulation platform.
 
+## Table of Contents
+
+- [1. Objective](#1-objective)
+- [2. Tech Stack](#2-tech-stack)
+- [3. Architecture Overview](#3-architecture-overview)
+- [4. End-to-End Flow](#4-end-to-end-flow)
+- [5. API Documentation](#5-api-documentation)
+- [6. Data Model](#6-data-model)
+- [7. Reliability, Lifecycle, and Failure Handling](#7-reliability-lifecycle-and-failure-handling)
+- [8. Safety Controls](#8-safety-controls)
+- [9. Scalability Considerations](#9-scalability-considerations)
+- [10. Setup Instructions](#10-setup-instructions)
+- [11. Environment Variables](#11-environment-variables)
+- [12. Schema Migration Note](#12-schema-migration-note)
+- [13. Tests](#13-tests)
+- [14. Design Decisions and Trade-offs](#14-design-decisions-and-trade-offs)
+- [15. What I Would Improve With More Time](#15-what-i-would-improve-with-more-time)
+- [16. Assignment Checklist Mapping](#16-assignment-checklist-mapping)
+
 ## 1. Objective
 
 This service allows learners to:
@@ -262,7 +281,17 @@ Mitigation ideas:
 - Docker Desktop
 - Docker Compose v2
 
-### 10.2 Run all services
+### 10.2 Pre-pull execution image
+
+The worker executes learner code with `docker run --rm python:3.11 ...`, so pull the runtime image once before the first execution:
+
+```bash
+docker pull python:3.11
+```
+
+This avoids first-run delay and prevents runtime failure if the host has not downloaded the execution image yet.
+
+### 10.3 Run all services
 
 ```bash
 docker compose up --build
@@ -276,7 +305,7 @@ Services:
 - Redis: `localhost:6379`
 - pgAdmin: `http://localhost:5050`
 
-### 10.3 Stop services
+### 10.4 Stop services
 
 ```bash
 docker compose down
@@ -288,7 +317,7 @@ To remove persisted DB/Redis volumes:
 docker compose down -v
 ```
  
-### 10.4 Check logs
+### 10.5 Check logs
 ```bash
 docker compose logs -f <image_name>
 ```
