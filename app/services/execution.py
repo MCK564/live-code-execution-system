@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 
 from exceptions.DataNotFoundException import DataNotFoundException
 
+from dependencies.pagination import PaginationParams
+
 
 def run_code_session(session_id: str, db: Session):
 
@@ -44,7 +46,20 @@ def get_execution_result(execution_id: str, db: Session):
                        .filter(execution.id == execution_id)
                        .first())
     if not saved_execution:
-
         raise DataNotFoundException(f"Execution not found with id: {execution_id}")
+
     return saved_execution
+
+
+def get_last_execution_result_by_session_id(session_id: str, db: Session):
+    return (db.query(execution)
+                       .filter(execution.session_id == session_id)
+                       .order_by(execution.queued_at.desc())
+                       .first())
+
+
+def get_list_executions_by_session_id(session_id: str, db:Session, pagination: PaginationParams):
+    return (db.query(execution)
+                  .filter(execution.session_id == session_id)
+                  .order_by(execution.queued_at.desc()))
 

@@ -1,5 +1,6 @@
 from pydantic import BaseModel, ConfigDict
 from datetime import datetime
+from schemas.pagination import Pagination
 
 EXECUTION_TIME_LIMIT = 10 #seconds
 
@@ -17,9 +18,17 @@ class ExecutionResultResponse(BaseModel):
     status: str
     stdout: str
     stderr: str
-    execution_time_ms: int | None
+    execution_time_ms: int | None = None
     queued_at: datetime | None = None
     running_at: datetime | None = None
     completed_at: datetime | None = None
     failed_at: datetime | None = None
     timeout_at: datetime | None = None
+
+
+class ExecutionHistory(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    session_id : str
+    items : list[ExecutionResultResponse] | None = None
+    pagination: Pagination | None = None
