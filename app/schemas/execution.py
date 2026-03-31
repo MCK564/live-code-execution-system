@@ -32,3 +32,19 @@ class ExecutionHistory(BaseModel):
     session_id : str
     items : list[ExecutionResultResponse] | None = None
     pagination: Pagination | None = None
+
+
+
+class ExecutionCancelResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    execution_id: str
+    status: str
+    message: str | None = None
+
+class ExecutionRetryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    old_execution_id: str
+    new_execution_id: str
+    status: str
+    message: str | None = None
+

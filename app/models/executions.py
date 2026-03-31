@@ -32,6 +32,7 @@ class Execution(Base):
     completed_at = Column(DateTime(timezone=True))
     failed_at = Column(DateTime(timezone=True))
     timeout_at = Column(DateTime(timezone=True))
+    cancelled_at = Column(DateTime(timezone=True))
 
     @property
     def execution_id(self) -> str:

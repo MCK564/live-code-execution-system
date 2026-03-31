@@ -1,3 +1,6 @@
+import logging
+from fastapi import HTTPException
+
 from schemas.code_session import CodeSessionRequest as code_session_request, CodeSessionUpdateRequest as code_session_update_request
 from schemas.code_session import CodeSessionResponse as code_session_response, TEMPLATES as templates
 from schemas.execution import ExecutionResponse as execution_response, ExecutionResultResponse as execution_result_response
@@ -12,8 +15,21 @@ from exceptions.DataNotFoundException import DataNotFoundException
 
 from dependencies.pagination import PaginationParams
 
+from core.redis_client import redis_client
+from models.enums.status import ExecutionStatus
+
+from schemas.execution import ExecutionRetryResponse
+
+from schemas.execution import ExecutionCancelResponse
+
 
 def run_code_session(session_id: str, db: Session):
+    previous = db.query(execution).filter(
+        execution.session_id == session_id,
+        execution.status.in_([ExecutionStatus.RUNNING, ExecutionStatus.QUEUED])).first()
+
+    if previous:
+        cancel_execution(previous.id,db)
 
     if execution_queue.count >= TASK_QUEUE_SIZE_LIMIT:
         raise Exception("System is busy, please try again later")
@@ -62,4 +78,34 @@ def get_list_executions_by_session_id(session_id: str, db:Session, pagination: P
     return (db.query(execution)
                   .filter(execution.session_id == session_id)
                   .order_by(execution.queued_at.desc()))
+
+
+
+def cancel_execution(execution_id: str, db: Session):
+    exe = db.query(execution).filter(execution.id == execution_id).first()
+    if not exe:
+        raise DataNotFoundException(f"Execution not found with id: {execution_id}")
+
+    if exe.status not in [ExecutionStatus.QUEUED, ExecutionStatus.RUNNING]:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot cancel execution with status : {exe.status.value}"
+        )
+
+    lock_key = f"lock:session:{exe.session_id}"
+    redis_client.delete(lock_key)
+    logging.info("Cancel | execution_id=%s | redis lock released", execution_id)
+
+    exe.status = ExecutionStatus.CANCELLED
+    exe.failed_at = datetime.now(timezone.utc)
+    exe.stderr = "Execution cancelled by user"
+
+    db.commit()
+
+    logging.info("Cancel | execution_id=%s | status -> CANCELLED", execution_id)
+    return ExecutionCancelResponse(execution_id=execution_id)
+
+
+def retry_execution(execution_id: str, db:Session) -> ExecutionRetryResponse:
+    return None
 

@@ -71,7 +71,8 @@ db.sqlite3-journal
 # Flask stuff:
 instance/
 .webassets-cache
-
+pytest-cache-files-vbns5l1f/
+pytest-cache-files-y0yubmzo/
 # Scrapy stuff:
 .scrapy
 

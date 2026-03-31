@@ -41,6 +41,8 @@ def _set_execution_status(saved_execution: execution, next_status: ExecutionStat
         saved_execution.failed_at = now
     elif next_status == ExecutionStatus.TIMEOUT:
         saved_execution.timeout_at = now
+    elif next_status == ExecutionStatus.CANCELLED:
+        saved_execution.cancelled_at = now
 
 
 def _ensure_queued_timestamp(saved_execution: execution):

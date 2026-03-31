@@ -5,6 +5,7 @@ from core.database import get_db
 from sqlalchemy.orm import Session
 from services import execution
 
+from schemas.execution import ExecutionCancelResponse
 
 router = APIRouter(prefix="/executions", tags=["executions"])
 
@@ -18,7 +19,7 @@ async def retrieve_execution(execution_id: str, db: Session = Depends(get_db)):
     return None
 
 
-@router.post("/{execution_id}/cancel")
+@router.post("/{execution_id}/cancel", response_model=ExecutionCancelResponse)
 async def cancel_execution(execution_id: str, db: Session = Depends(get_db)):
-    return None
+    return execution.cancel_execution(execution_id, db)
 

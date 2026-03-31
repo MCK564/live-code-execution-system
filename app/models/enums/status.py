@@ -7,6 +7,8 @@ class ExecutionStatus(Enum):
     FAILED = "FAILED"
     RUNNING = "RUNNING"
     TIMEOUT = "TIMEOUT"
+    CANCELLED = "CANCELLED"
+
 
 
 class SessionStatus(Enum):
