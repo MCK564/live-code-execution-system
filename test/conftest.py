@@ -1,11 +1,16 @@
 import sys
 from pathlib import Path
 import types
+import os
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app"
 if str(APP_PATH) not in sys.path:
     sys.path.insert(0, str(APP_PATH))
+
+
+os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 
 # Test-only shim to avoid platform-specific rq import issues on Windows.

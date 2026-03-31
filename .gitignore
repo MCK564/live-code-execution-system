@@ -61,6 +61,7 @@ cover/
 *.mo
 *.pot
 
+redis_command.txt
 # Django stuff:
 *.log
 local_settings.py

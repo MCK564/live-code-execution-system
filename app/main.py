@@ -1,4 +1,6 @@
 from fastapi import FastAPI
+
+from core.logging_config import setup_logging
 from core.database import Base,engine,get_db
 from api import code_session as code_session_api, execution as execution_api
 from handlers import exception_handler
@@ -14,4 +16,5 @@ app.include_router(code_session_api.router)
 app.include_router(execution_api.router)
 
 
+setup_logging()
 exception_handler.register_not_found_exception_handler(app)

@@ -287,6 +287,8 @@ The worker executes learner code with `docker run --rm python:3.11 ...`, so pull
 
 ```bash
 docker pull python:3.11
+docker pull eclipse-temurin:17
+docker pull gcc:13
 ```
 
 This avoids first-run delay and prevents runtime failure if the host has not downloaded the execution image yet.

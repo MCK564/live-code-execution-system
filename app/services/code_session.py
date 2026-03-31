@@ -4,16 +4,12 @@ from sqlalchemy.orm import Session
 from models.code_session import CodeSession as code_session
 from services.execution import get_last_execution_result_by_session_id, get_list_executions_by_session_id
 from exceptions.DataNotFoundException import DataNotFoundException
-
 from schemas.code_session import CodeSessionFullState as code_session_full_state
-
 from schemas.execution import ExecutionResultResponse as execution_result_response
-
 from dependencies.pagination import PaginationParams
-
 from utils.pagination import pagainate
-
 from schemas.execution import ExecutionHistory
+from schemas.code_session import CodeSessionResponse, TEMPLATES
 
 
 def create_code_session(request: code_session_request, db: Session):
@@ -24,11 +20,17 @@ def create_code_session(request: code_session_request, db: Session):
     db.commit()
     db.refresh(session)
 
-    return session
+    return CodeSessionResponse.model_validate({
+        "session_id": session.session_id,
+        "status": session.status,
+        "language": session.language,
+        "template_code": TEMPLATES[session.language],
+    })
 
 def update_code_session_frequently(session_id: str, request: code_session_update_request, db: Session):
 
     session = db.query(code_session).filter(code_session.id == session_id).first()
+
     if not session:
         raise DataNotFoundException(f"Session not found with id: {session_id}")
     if session:

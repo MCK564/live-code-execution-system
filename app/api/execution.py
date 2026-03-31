@@ -13,3 +13,12 @@ async def get_execution_result(execution_id: str,  db: Session = Depends(get_db)
     return execution.get_execution_result(execution_id, db)
 
 
+@router.post("/{execution_id}/retry")
+async def retrieve_execution(execution_id: str, db: Session = Depends(get_db)):
+    return None
+
+
+@router.post("/{execution_id}/cancel")
+async def cancel_execution(execution_id: str, db: Session = Depends(get_db)):
+    return None
+
