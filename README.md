@@ -8,6 +8,48 @@ This repository contains a Dockerized live-coding platform with:
 - Redis + RQ for async execution and session-sync jobs
 - a worker that runs learner code inside isolated Docker containers
 
+## Table of Contents
+
+- [1. Current System Summary](#1-current-system-summary)
+- [2. Architecture Overview](#2-architecture-overview)
+- [3. Main Modules](#3-main-modules)
+- [4. End-to-End Runtime Flows](#4-end-to-end-runtime-flows)
+  - [4.1 Session Creation](#41-session-creation)
+  - [4.2 Autosave Flow](#42-autosave-flow)
+  - [4.3 Execution Flow](#43-execution-flow)
+  - [4.4 Analyzer Flow](#44-analyzer-flow)
+- [5. Frontend Behavior](#5-frontend-behavior)
+- [6. API Surface](#6-api-surface)
+  - [6.1 Session Endpoints](#61-session-endpoints)
+  - [6.2 Execution Endpoints](#62-execution-endpoints)
+  - [6.3 Analyzer Endpoints](#63-analyzer-endpoints)
+  - [6.4 Example Analyzer Result](#64-example-analyzer-result)
+  - [6.5 Example Analyzer WebSocket Message](#65-example-analyzer-websocket-message)
+- [7. Supported Languages](#7-supported-languages)
+  - [7.1 Execution](#71-execution)
+  - [7.2 Analysis](#72-analysis)
+- [8. Data Model](#8-data-model)
+  - [8.1 `code_sessions`](#81-code_sessions)
+  - [8.2 `executions`](#82-executions)
+- [9. Redis Usage](#9-redis-usage)
+- [10. Reliability and Safety Controls](#10-reliability-and-safety-controls)
+  - [10.1 Reliability](#101-reliability)
+  - [10.2 Execution Safety](#102-execution-safety)
+- [11. Dockerized Services](#11-dockerized-services)
+- [12. Setup](#12-setup)
+  - [12.1 Prerequisites](#121-prerequisites)
+  - [12.2 Pre-pull Runtime Images](#122-pre-pull-runtime-images)
+  - [12.3 Start the Whole Stack](#123-start-the-whole-stack)
+  - [12.4 Access the Services](#124-access-the-services)
+  - [12.5 Stop the Stack](#125-stop-the-stack)
+  - [12.6 Logs](#126-logs)
+- [13. Local Development Notes](#13-local-development-notes)
+  - [13.1 Backend](#131-backend)
+  - [13.2 Frontend](#132-frontend)
+- [14. Verification Status](#14-verification-status)
+- [15. Known Gaps and Caveats](#15-known-gaps-and-caveats)
+- [16. Recommended Next Improvements](#16-recommended-next-improvements)
+
 ## 1. Current System Summary
 
 The current system supports three main capabilities:
