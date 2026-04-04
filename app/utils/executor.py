@@ -12,6 +12,7 @@ from schemas.execution import EXECUTION_TIME_LIMIT
 from core.redis_client import redis_client
 from core.language_config import LANGUAGE_CONFIGS, LanguageConfig
 import logging
+from utils import redis as session_cache
 
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,42 @@ def _ensure_queued_timestamp(saved_execution: execution):
         saved_execution.queued_at = _utc_now()
 
 
+def _apply_cached_session_snapshot(session):
+    snapshot = session_cache.get_session(str(session.id))
+    if not snapshot:
+        return session
+
+    session.language = snapshot.get("language", session.language)
+    session.source_code = snapshot.get("source_code", session.source_code)
+    return session
+
+
+def _get_runtime_image_error(image: str) -> str | None:
+    try:
+        inspect_result = subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        return f"Timed out while checking runtime image {image}"
+    except Exception as exc:
+        return f"Failed to inspect runtime image {image}: {exc}"
+
+    if inspect_result.returncode == 0:
+        return None
+
+    detail = (inspect_result.stderr or inspect_result.stdout or "").strip()
+    message = (
+        f"Runtime image {image} is not available locally. "
+        f"Pull it first with: docker pull {image}"
+    )
+    if detail:
+        return f"{message}. Docker said: {detail}"
+    return message
+
+
 
 def execute_code_task(execution_id: str):
     logging.info(f"Executing code task for execution_id: {execution_id}")
@@ -81,6 +118,8 @@ def execute_code_task(execution_id: str):
             saved_execution.stderr = "Session not found"
             db.commit()
             return
+
+        session = _apply_cached_session_snapshot(session)
 
         if session.language not in SUPPORTED_LANGUAGES:
             _set_execution_status(saved_execution, ExecutionStatus.FAILED)
@@ -155,6 +194,7 @@ def run_in_docker(execution_id: str):
         db.refresh(saved_execution)
 
         session = db.query(code_session).filter(code_session.id == saved_execution.session_id).first()
+
         if not session:
             _set_execution_status(saved_execution, ExecutionStatus.FAILED)
             logger.info("Execution %s status -> FAILED (session not found)", execution_id)
@@ -162,7 +202,23 @@ def run_in_docker(execution_id: str):
             db.commit()
             return
 
+        session = _apply_cached_session_snapshot(session)
+
+        if session.language not in SUPPORTED_LANGUAGES:
+            _set_execution_status(saved_execution, ExecutionStatus.FAILED)
+            logger.info("Execution %s status -> FAILED (unsupported language)", execution_id)
+            saved_execution.stderr = f"Unsupported language: {session.language}"
+            db.commit()
+            return
+
         config: LanguageConfig = LANGUAGE_CONFIGS[session.language]
+        runtime_image_error = _get_runtime_image_error(config.image)
+        if runtime_image_error:
+            _set_execution_status(saved_execution, ExecutionStatus.FAILED)
+            logger.info("Execution %s status -> FAILED (runtime image unavailable)", execution_id)
+            saved_execution.stderr = runtime_image_error
+            db.commit()
+            return
 
         if not config.requires_compile:
             command = [
@@ -209,13 +265,6 @@ def run_in_docker(execution_id: str):
                 "sh", "-c", shell_command
             ]
 
-        if session.language not in SUPPORTED_LANGUAGES:
-            _set_execution_status(saved_execution, ExecutionStatus.FAILED)
-            logger.info("Execution %s status -> FAILED (unsupported language)", execution_id)
-            saved_execution.stderr = f"Unsupported language: {session.language}"
-            db.commit()
-            return
-
         start_time = time.time()
 
         try:
@@ -255,7 +304,5 @@ def run_in_docker(execution_id: str):
             redis_client.delete(lock_key)
         db.commit()
         db.close()
-
-
 
 

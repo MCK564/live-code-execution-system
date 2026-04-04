@@ -1,289 +1,373 @@
-# Live Code Execution System
+# Live Code Execution and Analysis System
 
-Backend take-home assignment implementation for a live coding feature inside a Job Simulation platform.
+This repository contains a Dockerized live-coding platform with:
 
-## Table of Contents
+- a React + Vite frontend packaged behind Nginx
+- a FastAPI backend for sessions, execution, and code analysis
+- PostgreSQL as the source of truth
+- Redis + RQ for async execution and session-sync jobs
+- a worker that runs learner code inside isolated Docker containers
 
-- [1. Objective](#1-objective)
-- [2. Tech Stack](#2-tech-stack)
-- [3. Architecture Overview](#3-architecture-overview)
-- [4. End-to-End Flow](#4-end-to-end-flow)
-- [5. API Documentation](#5-api-documentation)
-- [6. Data Model](#6-data-model)
-- [7. Reliability, Lifecycle, and Failure Handling](#7-reliability-lifecycle-and-failure-handling)
-- [8. Safety Controls](#8-safety-controls)
-- [9. Scalability Considerations](#9-scalability-considerations)
-- [10. Setup Instructions](#10-setup-instructions)
-- [11. Environment Variables](#11-environment-variables)
-- [12. Schema Migration Note](#12-schema-migration-note)
-- [13. Tests](#13-tests)
-- [14. Design Decisions and Trade-offs](#14-design-decisions-and-trade-offs)
-- [15. What I Would Improve With More Time](#15-what-i-would-improve-with-more-time)
-- [16. Assignment Checklist Mapping](#16-assignment-checklist-mapping)
+## 1. Current System Summary
 
-## 1. Objective
+The current system supports three main capabilities:
 
-This service allows learners to:
+1. Session editing with Redis-backed autosave and eventual DB sync
+2. Asynchronous code execution for `python`, `java`, and `cpp`
+3. Static code analysis for `python`, `java`, and `cpp`, exposed via both HTTP and WebSocket
 
-- Create a live coding session.
-- Continuously autosave code.
-- Execute code asynchronously.
-- Poll execution results with runtime status and output.
+The frontend is now part of the Docker Compose stack and is served on `http://localhost:3000`. It proxies both REST and WebSocket traffic under `/api` to the FastAPI backend.
 
-It is designed around queue-based background execution, basic sandboxing, and clear execution lifecycle tracking.
-
-## 2. Tech Stack
-
-- Backend framework: FastAPI
-- Database: PostgreSQL + SQLAlchemy ORM
-- Queue: Redis + RQ
-- Worker: Python RQ worker
-- Containerization: Docker + Docker Compose
-- Tests: pytest (service-layer unit tests)
-
-## 3. Architecture Overview
+## 2. Architecture Overview
 
 ```text
-Client
+Browser
   |
   v
-FastAPI (API Layer)
-  |                    \
-  |                     \ enqueue
-  v                      v
-PostgreSQL          Redis Queue (execution_queue)
-                          |
-                          v
-                     RQ Worker
-                          |
-                          v
-                 Isolated code run (docker run --rm)
-                          |
-                          v
-                     Update execution row
+UI Container (Nginx, port 3000)
+  | \
+  |  \ REST + WebSocket proxy (/api/*)
+  v   v
+FastAPI (port 8001)
+  |        |             \
+  |        |              \ enqueue
+  |        |               v
+  |        |         Redis + RQ
+  |        |          - execution_queue
+  |        |          - session_sync_queue
+  |        |          - session snapshot cache
+  |        |          - per-session execution lock
+  |        v
+  |    PostgreSQL
+  |
+  v
+Analyzer Engine
+  - Python AST rules
+  - Java/C++ Tree-Sitter rules
+
+RQ Worker
+  |
+  v
+docker run --rm <runtime image>
+  |
+  v
+Execution status + stdout/stderr persisted to PostgreSQL
 ```
 
-Main modules:
+## 3. Main Modules
 
-- API layer: `app/api/*`
-- Services: `app/services/*`
-- Queue config: `app/core/task_queue.py`
-- Worker process: `app/core/worker.py`
-- Execution engine: `app/utils/executor.py`
-- Data models: `app/models/*`
+- Backend entrypoint: `app/main.py`
+- Session API: `app/api/code_session.py`
+- Execution API: `app/api/execution.py`
+- Analyzer API: `app/api/analyzer.py`
+- Session service: `app/services/code_session.py`
+- Execution service: `app/services/execution.py`
+- Execution worker logic: `app/utils/executor.py`
+- Redis helpers: `app/utils/redis.py`
+- Analyzer engine: `app/analysis/*`
+- Frontend app shell: `UI/src/pages/ExecutionWorkspacePage.jsx`
+- Frontend analyzer socket client: `UI/src/api/analyzerSocket.js`
+- Compose stack: `docker-compose.yml`
 
-## 4. End-to-End Flow
+## 4. End-to-End Runtime Flows
 
-### 4.1 Session creation
+### 4.1 Session Creation
 
-1. Client calls `POST /code-sessions`.
-2. API creates a `code_sessions` row with `ACTIVE` status.
-3. Returns `session_id`.
+1. The client calls `POST /code-sessions`.
+2. FastAPI creates a `code_sessions` row with `ACTIVE` status and a language template.
+3. The same payload is written into Redis as the latest session snapshot.
+4. The frontend stores `session_id` and begins working against that session.
 
-### 4.2 Autosave
+### 4.2 Autosave Flow
 
-1. Client calls `PATCH /code-sessions/{session_id}` frequently.
-2. API updates `language` and `source_code` in DB.
-3. Returns session metadata.
+1. The client updates code with `PATCH /code-sessions/{session_id}`.
+2. The latest payload is written to Redis immediately.
+3. A `session_sync_queue` job is enqueued once per short window.
+4. The worker persists the Redis snapshot back into PostgreSQL.
 
-### 4.3 Run execution (async)
+This means Redis is the fast-write layer for editing, while PostgreSQL remains the long-term source of truth.
 
-1. Client calls `POST /code-sessions/{session_id}/run`.
-2. API creates `executions` row with `QUEUED` status.
-3. Job is enqueued to Redis.
-4. API returns immediately (`execution_id`, `QUEUED`).
+### 4.3 Execution Flow
 
-### 4.4 Background execution + polling
+1. The client calls `POST /code-sessions/{session_id}/run`.
+2. The backend cancels any previous `QUEUED` or `RUNNING` execution for that session.
+3. A new execution row is inserted with `QUEUED`.
+4. The job is pushed into `execution_queue`.
+5. The worker loads the session, applies the latest Redis snapshot if present, and acquires a per-session Redis lock.
+6. The worker checks that the required runtime image already exists locally.
+7. The worker runs the code with `docker run`.
+8. PostgreSQL is updated with status, timestamps, output, and execution time.
+9. The frontend polls `GET /executions/{execution_id}` until a terminal state is reached.
 
-1. Worker picks job.
-2. Worker sets `RUNNING` and runs code in isolated Docker process.
-3. Worker writes `stdout`, `stderr`, `execution_time_ms`, final status.
-4. Client polls `GET /executions/{execution_id}` until terminal state.
+### 4.4 Analyzer Flow
 
-## 5. API Documentation
+The analyzer is exposed in two ways:
 
-Base URL (local Docker): `http://localhost:8001`
+- `POST /analyzer` for request/response analysis
+- `WS /analyzer/ws/{session_id}` for live analysis
 
-### 5.1 Create session
+The current frontend uses the WebSocket path:
 
-- Method: `POST`
-- Path: `/code-sessions`
-- Request:
+1. The UI opens an analyzer socket.
+2. Source changes are debounced on the client.
+3. The UI sends `analyze.request` messages with a monotonically increasing `version`.
+4. The backend runs the analyzer and returns `analyze.result`.
+5. The UI ignores stale versions and only renders the latest result.
 
-```json
-{
-  "language": "python"
-}
-```
+## 5. Frontend Behavior
 
-- Response:
+The React UI provides:
 
-```json
-{
-  "session_id": "uuid",
-  "status": "ACTIVE"
-}
-```
+- language selector with built-in templates
+- session creation and save controls
+- async run button with execution polling
+- runtime output tab for `stdout`, `stderr`, and execution time
+- analysis tab with:
+  - score card
+  - issue badge count
+  - severity-colored alert cards
+  - confidence bars
+  - expandable detail and fix text
 
-### 5.2 Autosave code
+The analyzer tab is backed by WebSocket, not HTTP polling.
 
-- Method: `PATCH`
-- Path: `/code-sessions/{session_id}`
-- Request:
+## 6. API Surface
+
+Base URLs:
+
+- Packaged UI: `http://localhost:3000`
+- Backend direct: `http://localhost:8001`
+- Swagger UI: `http://localhost:8001/docs`
+
+### 6.1 Session Endpoints
+
+- `POST /code-sessions`
+  - Create a new session with template code for the selected language.
+- `PATCH /code-sessions/{session_id}`
+  - Update `language` and `source_code`.
+- `GET /code-sessions/{session_id}`
+  - Return the latest session state plus the latest execution.
+- `GET /code-sessions/{session_id}/executions`
+  - Return paginated execution history for the session.
+- `POST /code-sessions/{session_id}/run`
+  - Enqueue a new async execution job.
+
+### 6.2 Execution Endpoints
+
+- `GET /executions/{execution_id}`
+  - Return the execution state and output.
+- `POST /executions/{execution_id}/cancel`
+  - Attempt to cancel a `QUEUED` or `RUNNING` execution.
+- `POST /executions/{execution_id}/retry`
+  - Present in the route table but currently not implemented.
+
+### 6.3 Analyzer Endpoints
+
+- `GET /analyzer/languages`
+  - Return supported analyzer languages.
+- `POST /analyzer`
+  - Run analyzer over a single request.
+- `WS /analyzer/ws/{session_id}`
+  - Live analysis channel with `ping`, `pong`, `analyze.request`, `analyze.result`, and `analyze.error`.
+
+### 6.4 Example Analyzer Result
 
 ```json
 {
   "language": "python",
-  "source_code": "print('Hello World')"
+  "result": {
+    "alerts": [
+      {
+        "kind": "infinite_loop",
+        "severity": "critical",
+        "line": 1,
+        "message": "Unconditional infinite loop with no exit path",
+        "detail": "`while True` has no break, return, or exit call.",
+        "fix": "Add a break condition or update a guard variable inside the loop.",
+        "confidence": 0.97
+      }
+    ],
+    "score": 70.0,
+    "summary": "1 critical issue(s) detected.",
+    "parse_error": null
+  }
 }
 ```
 
-- Response:
+### 6.5 Example Analyzer WebSocket Message
+
+Request:
 
 ```json
 {
-  "session_id": "uuid",
-  "status": "ACTIVE"
+  "type": "analyze.request",
+  "version": 7,
+  "request_id": "7",
+  "language": "python",
+  "source_code": "while True:\n    pass"
 }
 ```
 
-### 5.3 Run code asynchronously
-
-- Method: `POST`
-- Path: `/code-sessions/{session_id}/run`
-- Response:
+Response:
 
 ```json
 {
-  "execution_id": "uuid",
-  "status": "QUEUED"
+  "type": "analyze.result",
+  "session_id": "workspace-live-analysis",
+  "version": 7,
+  "language": "python",
+  "request_id": "7",
+  "took_ms": 0.349,
+  "result": {
+    "alerts": [
+      {
+        "kind": "infinite_loop",
+        "severity": "critical",
+        "line": 1,
+        "message": "Unconditional infinite loop with no exit path",
+        "detail": "`while True` has no break, return, or exit call.",
+        "fix": "Add a break condition or update a guard variable inside the loop.",
+        "confidence": 0.97
+      }
+    ],
+    "score": 70.0,
+    "summary": "1 critical issue(s) detected.",
+    "parse_error": null
+  }
 }
 ```
 
-### 5.4 Get execution result
+## 7. Supported Languages
 
-- Method: `GET`
-- Path: `/executions/{execution_id}`
-- Response:
+### 7.1 Execution
 
-```json
-{
-  "execution_id": "uuid",
-  "status": "COMPLETED",
-  "stdout": "Hello World\n",
-  "stderr": "",
-  "execution_time_ms": 120,
-  "queued_at": "2026-03-18T13:05:00.000000+00:00",
-  "running_at": "2026-03-18T13:05:01.000000+00:00",
-  "completed_at": "2026-03-18T13:05:01.120000+00:00",
-  "failed_at": null,
-  "timeout_at": null
-}
-```
+Execution is implemented for:
 
-Execution states:
+- `python`
+- `java`
+- `cpp`
 
-- `QUEUED`
-- `RUNNING`
-- `COMPLETED`
-- `FAILED`
-- `TIMEOUT`
+Configured runtime images:
 
-## 6. Data Model
+- `python:3.11`
+- `eclipse-temurin:17`
+- `gcc:13`
 
-### 6.1 `code_sessions`
+### 7.2 Analysis
 
-- `id` (UUID, PK)
-- `status` (`ACTIVE` or `INACTIVE`)
+Static analysis currently supports:
+
+- `python`
+- `java`
+- `cpp`
+
+Implementation strategy:
+
+- Python uses Python AST rules
+- Java and C++ use Tree-Sitter parsing and rule sets
+
+## 8. Data Model
+
+### 8.1 `code_sessions`
+
+- `id` UUID primary key
+- `status` (`ACTIVE`, `INACTIVE`)
 - `language`
 - `source_code`
 - `created_at`
 - `updated_at`
 
-### 6.2 `executions`
+### 8.2 `executions`
 
-- `id` (UUID, PK)
-- `session_id` (FK -> `code_sessions.id`)
-- `status` (`QUEUED`, `RUNNING`, `COMPLETED`, `FAILED`, `TIMEOUT`)
+- `id` UUID primary key
+- `session_id` foreign key to `code_sessions.id`
+- `status` (`QUEUED`, `RUNNING`, `COMPLETED`, `FAILED`, `TIMEOUT`, `CANCELLED`)
 - `stdout`
 - `stderr`
-- `execution_time_ms` (Integer)
+- `execution_time_ms`
 - `created_at`
 - `queued_at`
 - `running_at`
 - `completed_at`
 - `failed_at`
 - `timeout_at`
+- `cancelled_at`
 
-## 7. Reliability, Lifecycle, and Failure Handling
+## 9. Redis Usage
 
-Lifecycle transition:
+Redis is used for more than just queueing:
 
-- `QUEUED -> RUNNING -> COMPLETED | FAILED | TIMEOUT`
+1. RQ queues
+   - `execution_queue`
+   - `session_sync_queue`
+2. Latest session snapshot cache
+   - `session:{session_id}:latest`
+3. Session sync enqueue flag
+   - `session:{session_id}:sync-enqueued`
+4. Per-session execution lock
+   - `lock:session:{session_id}`
 
-Current reliability controls:
+## 10. Reliability and Safety Controls
 
-- Queue-based async execution (API is not blocked by runtime work).
-- Retry policy on enqueue (`Retry(max=3, interval=[10,30,60])`).
-- Per-session Redis lock to prevent concurrent execution overlap on the same session.
-- Queue backlog guard via `TASK_QUEUE_SIZE_LIMIT = 5`.
-- Custom not-found exception handler for missing session/execution.
-- Stage timestamps (`queued_at`, `running_at`, `completed_at`, `failed_at`, `timeout_at`).
+### 10.1 Reliability
 
-Failure modes handled:
+- Async execution through Redis + RQ
+- Queue backlog protection with `TASK_QUEUE_SIZE_LIMIT = 5`
+- Retry on execution enqueue: `Retry(max=3, interval=[10, 30, 60])`
+- Retry on session sync enqueue: `Retry(max=3, interval=[1, 5, 10])`
+- Per-session Redis lock to prevent concurrent overlapping runs
+- Timestamped execution lifecycle transitions
+- Redis snapshot applied before execution so worker uses the latest code
+- Runtime image preflight check to fail fast when images are missing locally
 
-- Session not found.
-- Unsupported language.
-- Runtime timeout.
-- Runtime process error.
-- Queue overload (`System is busy, please try again later`).
+### 10.2 Execution Safety
 
-## 8. Safety Controls
+The Python execution path uses:
 
-Current code execution restrictions:
+- `--memory=256m`
+- `--cpus=0.5`
+- `--read-only`
+- `--pids-limit=50`
+- `--cap-drop=ALL`
+- `--network none`
+- `--rm`
 
-- Language restriction (`python` only for execution path).
-- Time limit (`EXECUTION_TIME_LIMIT = 10` seconds).
-- Docker runtime constraints:
-  - `--memory=256m`
-  - `--cpus=0.5`
-  - `--read-only`
-  - `--pids-limit=50`
-  - `--cap-drop=ALL`
-  - `--network none`
-  - `--rm`
+The compiled-language path (`java`, `cpp`) also uses container isolation and a shared Docker volume workspace, but it skips `--read-only` because source files and build artifacts must be written inside the mounted workspace.
 
-## 9. Scalability Considerations
+## 11. Dockerized Services
 
-Current approach:
+`docker-compose.yml` currently defines:
 
-- Async queue decouples API and execution workload.
-- Worker can be scaled horizontally (`docker compose up --scale worker=N`).
-- Queue size limit protects system from unlimited backlog growth.
+- `postgres`
+  - PostgreSQL 15
+  - exposed on `localhost:5432`
+- `pgadmin`
+  - exposed on `http://localhost:5050`
+- `redis`
+  - Redis 7
+  - exposed on `localhost:6379`
+- `fastapi-app`
+  - FastAPI backend on `http://localhost:8001`
+- `worker`
+  - RQ worker for execution and session sync
+- `ui`
+  - packaged React frontend served by Nginx on `http://localhost:3000`
 
-Potential bottlenecks:
+The UI container proxies:
 
-- Cold start overhead from `docker run` per execution.
-- Single Redis instance.
-- DB write contention under heavy load.
+- REST calls under `/api/*`
+- analyzer WebSocket upgrades under `/api/analyzer/ws/*`
 
-Mitigation ideas:
+## 12. Setup
 
-- Warm container pool + `docker exec` strategy.
-- API rate limiting at gateway layer.
-- Split queues by priority/language.
-- Add dead-letter handling and replay controls.
-
-## 10. Setup Instructions
-
-### 10.1 Prerequisites
+### 12.1 Prerequisites
 
 - Docker Desktop
 - Docker Compose v2
 
-### 10.2 Pre-pull execution image
+### 12.2 Pre-pull Runtime Images
 
-The worker executes learner code with `docker run --rm python:3.11 ...`, so pull the runtime image once before the first execution:
+Pull runtime images before the first execution:
 
 ```bash
 docker pull python:3.11
@@ -291,122 +375,132 @@ docker pull eclipse-temurin:17
 docker pull gcc:13
 ```
 
-This avoids first-run delay and prevents runtime failure if the host has not downloaded the execution image yet.
+Without these images, the worker will fail fast with a clear `FAILED` status telling you which image is missing.
 
-### 10.3 Run all services
+### 12.3 Start the Whole Stack
 
 ```bash
 docker compose up --build
 ```
 
-Services:
+### 12.4 Access the Services
 
-- FastAPI: `http://localhost:8001`
+- UI: `http://localhost:3000`
+- Backend: `http://localhost:8001`
 - Swagger UI: `http://localhost:8001/docs`
 - PostgreSQL: `localhost:5432`
 - Redis: `localhost:6379`
 - pgAdmin: `http://localhost:5050`
 
-### 10.4 Stop services
+### 12.5 Stop the Stack
 
 ```bash
 docker compose down
 ```
 
-To remove persisted DB/Redis volumes:
+Remove volumes as well:
 
 ```bash
 docker compose down -v
 ```
- 
-### 10.5 Check logs
+
+### 12.6 Logs
+
 ```bash
-docker compose logs -f <image_name>
+docker compose logs -f <service-name>
 ```
 
-## 11. Environment Variables
+Examples:
 
-Defined in `app/.env`:
+- `docker compose logs -f fastapi-app`
+- `docker compose logs -f worker`
+- `docker compose logs -f ui`
+
+## 13. Local Development Notes
+
+### 13.1 Backend
+
+Backend environment variables are loaded from `app/.env`:
 
 - `DATABASE_URL=postgresql+psycopg2://admin:123456@postgres:5432/code_execution`
 - `REDIS_URL=redis://redis:6379/0`
 
-## 12. Schema Migration Note
+### 13.2 Frontend
 
-`Base.metadata.create_all()` does not alter existing tables.
+The frontend uses `VITE_API_BASE_URL` if provided; otherwise it defaults to `/api`.
 
-If you already have old `executions` schema, add new columns manually:
+In development, `UI/vite.config.js` proxies `/api` to `http://localhost:8001` and also allows WebSocket proxying for the analyzer channel.
 
-```sql
-ALTER TABLE executions ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ;
-ALTER TABLE executions ADD COLUMN IF NOT EXISTS running_at TIMESTAMPTZ;
-ALTER TABLE executions ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
-ALTER TABLE executions ADD COLUMN IF NOT EXISTS failed_at TIMESTAMPTZ;
-ALTER TABLE executions ADD COLUMN IF NOT EXISTS timeout_at TIMESTAMPTZ;
-ALTER TABLE executions ALTER COLUMN execution_time_ms TYPE INTEGER USING
-(
-  CASE
-    WHEN execution_time_ms IS NULL THEN NULL
-    WHEN execution_time_ms::text ~ '^[0-9]+$' THEN execution_time_ms::text::INTEGER
-    ELSE NULL
-  END
-);
-UPDATE executions SET queued_at = created_at WHERE queued_at IS NULL;
+## 14. Verification Status
+
+The current repository was re-checked against the implementation and verified with:
+
+- Backend tests:
+
+```bash
+python -m pytest -q -p no:cacheprovider test
 ```
 
-## 13. Tests
+Result:
 
-Implemented service-layer unit tests:
+- `18 passed in 2.32s`
 
-- `test/test-sessions.py`
-- `test/test-execution.py`
+- Frontend production build:
 
-These tests mock DB/queue behavior and do not require starting full platform.
-
-PowerShell example:
-
-```powershell
-$env:DATABASE_URL='sqlite:///./unit-test.db'
-$env:REDIS_URL='redis://localhost:6379/0'
-python -m pytest -q -p no:cacheprovider test/test-sessions.py test/test-execution.py 2>&1 | Tee-Object -FilePath test-results.txt
+```bash
+cd UI
+npm run build
 ```
 
-Latest run summary:
+Result:
 
-- `7 passed in 1.32s` (see `test-results.txt`)
+- Vite production build succeeds
 
-## 14. Design Decisions and Trade-offs
+- Dockerized UI build:
 
-Decisions:
+```bash
+docker compose build ui
+```
 
-- FastAPI + SQLAlchemy for fast implementation and readable API layer.
-- Redis/RQ for simple async worker model.
-- PostgreSQL as source of truth for execution state.
-- Docker-per-execution for stronger isolation than direct subprocess.
+Result:
 
-Trade-offs:
+- UI image builds successfully
 
-- Chosen simplicity and delivery speed over full production hardening.
-- `docker run` per request improves isolation but adds startup latency.
-- Basic queue-limit protection exists, but advanced abuse control can be improved.
+- Packaged UI availability:
 
-## 15. What I Would Improve With More Time
+```bash
+docker compose up -d ui
+curl -I http://localhost:3000
+```
 
-- Add Alembic migrations and migration automation.
-- Add API-level rate limiting and per-user quotas.
-- Add dead-letter queue and richer retry telemetry.
-- Add idempotency key for execution requests.
-- Add stronger observability (structured logs, metrics, traces).
-- Add integration tests against real PostgreSQL/Redis in CI.
-- Expand language support with compile pipelines (Java/C++).
+Result:
 
-## 16. Assignment Checklist Mapping
+- Nginx responds with `200 OK`
 
-- API layer (routes/controllers): done.
-- Queue producer/consumer: done.
-- Execution worker logic: done.
-- Data models: done.
-- Dockerfile + docker-compose: done.
-- Setup + architecture + API docs + trade-offs: documented in this README.
-- Unit tests: implemented for services.
-- Integration tests and failure-infra tests: not fully implemented yet.
+- Analyzer WebSocket through packaged UI:
+
+```text
+ws://localhost:3000/api/analyzer/ws/workspace-live-analysis
+```
+
+Result:
+
+- WebSocket handshake and `analyze.result` were verified through the Nginx proxy
+
+## 15. Known Gaps and Caveats
+
+- `POST /executions/{execution_id}/retry` is still a stub and returns `None`.
+- Schema creation uses `Base.metadata.create_all()` and does not provide full migration management. Alembic is not integrated yet.
+- The Java/C++ execution path mounts a hardcoded Docker volume name: `live-code-execution-system_shared_workspace`. If the Compose project name changes, compiled execution may need adjustment.
+- The worker requires access to the host Docker daemon via `/var/run/docker.sock`.
+- There is no authentication, authorization, or rate limiting yet.
+- Observability is still basic; there is no metrics or tracing pipeline.
+
+## 16. Recommended Next Improvements
+
+- Add Alembic migrations
+- Implement retry semantics for executions
+- Replace the hardcoded workspace volume name with a derived or configured value
+- Add integration tests against real PostgreSQL, Redis, and worker containers
+- Add authentication and per-user resource limits
+- Add structured metrics for queue depth, execution latency, and analyzer latency

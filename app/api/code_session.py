@@ -58,3 +58,5 @@ async def get_code_session_and_latest_execution(
         raise DataNotFoundException(f"Session not found with id: {session_id}")
 
     return last_execution
+
+

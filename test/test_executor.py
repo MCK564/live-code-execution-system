@@ -67,19 +67,26 @@ def make_session(language="python", source_code="print('Hello World')"):
     )
 
 
-def patch_runtime(monkeypatch, db, redis_lock=True):
+def patch_runtime(monkeypatch, db, redis_lock=True, runtime_image_error=None):
     redis_mock = SimpleNamespace(
         set=MagicMock(return_value=redis_lock),
         delete=MagicMock(),
     )
+    cache_stub = SimpleNamespace(get_session=MagicMock(return_value=None))
     monkeypatch.setattr(executor, "SessionLocal", MagicMock(return_value=db))
     monkeypatch.setattr(executor, "redis_client", redis_mock)
-    return redis_mock
+    monkeypatch.setattr(executor, "session_cache", cache_stub)
+    monkeypatch.setattr(
+        executor,
+        "_get_runtime_image_error",
+        MagicMock(return_value=runtime_image_error),
+    )
+    return redis_mock, cache_stub
 
 
 def test_run_in_docker_returns_early_when_execution_not_found(monkeypatch):
     db = DummyDB([None])
-    redis_mock = patch_runtime(monkeypatch, db)
+    redis_mock, _cache_stub = patch_runtime(monkeypatch, db)
     run_mock = MagicMock()
     monkeypatch.setattr(executor.subprocess, "run", run_mock)
 
@@ -94,7 +101,7 @@ def test_run_in_docker_returns_early_when_execution_not_found(monkeypatch):
 def test_run_in_docker_raises_when_redis_lock_already_exists(monkeypatch):
     saved_execution = make_execution()
     db = DummyDB([saved_execution])
-    redis_mock = patch_runtime(monkeypatch, db, redis_lock=False)
+    redis_mock, _cache_stub = patch_runtime(monkeypatch, db, redis_lock=False)
     run_mock = MagicMock()
     monkeypatch.setattr(executor.subprocess, "run", run_mock)
 
@@ -108,7 +115,7 @@ def test_run_in_docker_raises_when_redis_lock_already_exists(monkeypatch):
 def test_run_in_docker_marks_failed_when_session_not_found(monkeypatch):
     saved_execution = make_execution()
     db = DummyDB([saved_execution, None])
-    redis_mock = patch_runtime(monkeypatch, db, redis_lock=True)
+    redis_mock, _cache_stub = patch_runtime(monkeypatch, db, redis_lock=True)
     run_mock = MagicMock()
     monkeypatch.setattr(executor.subprocess, "run", run_mock)
 
@@ -125,7 +132,7 @@ def test_run_in_docker_marks_failed_for_unsupported_language(monkeypatch):
     saved_execution = make_execution()
     session = make_session(language="ruby", source_code="puts 'hi'")
     db = DummyDB([saved_execution, session])
-    redis_mock = patch_runtime(monkeypatch, db, redis_lock=True)
+    redis_mock, _cache_stub = patch_runtime(monkeypatch, db, redis_lock=True)
     run_mock = MagicMock()
     monkeypatch.setattr(executor.subprocess, "run", run_mock)
     monkeypatch.setitem(
@@ -149,11 +156,39 @@ def test_run_in_docker_marks_failed_for_unsupported_language(monkeypatch):
     assert redis_mock.delete.call_count == 1
 
 
+def test_run_in_docker_marks_failed_when_runtime_image_is_missing(monkeypatch):
+    saved_execution = make_execution()
+    session = make_session(language="python", source_code="print('Hello World')")
+    db = DummyDB([saved_execution, session])
+    redis_mock, _cache_stub = patch_runtime(
+        monkeypatch,
+        db,
+        redis_lock=True,
+        runtime_image_error=(
+            "Runtime image python:3.11 is not available locally. "
+            "Pull it first with: docker pull python:3.11"
+        ),
+    )
+    run_mock = MagicMock()
+    monkeypatch.setattr(executor.subprocess, "run", run_mock)
+
+    executor.run_in_docker("execution-id")
+
+    assert saved_execution.status == ExecutionStatus.FAILED
+    assert saved_execution.stderr == (
+        "Runtime image python:3.11 is not available locally. "
+        "Pull it first with: docker pull python:3.11"
+    )
+    assert saved_execution.failed_at is not None
+    assert run_mock.call_count == 0
+    assert redis_mock.delete.call_count == 1
+
+
 def test_run_in_docker_completes_python_execution_successfully(monkeypatch):
     saved_execution = make_execution()
     session = make_session(language="python", source_code="print('Hello World')")
     db = DummyDB([saved_execution, session])
-    redis_mock = patch_runtime(monkeypatch, db, redis_lock=True)
+    redis_mock, _cache_stub = patch_runtime(monkeypatch, db, redis_lock=True)
     run_mock = MagicMock(
         return_value=SimpleNamespace(stdout="Hello World\n", stderr="", returncode=0)
     )
@@ -181,7 +216,7 @@ def test_run_in_docker_marks_timeout_for_python_execution(monkeypatch):
     saved_execution = make_execution()
     session = make_session(language="python", source_code="while True: pass")
     db = DummyDB([saved_execution, session])
-    redis_mock = patch_runtime(monkeypatch, db, redis_lock=True)
+    redis_mock, _cache_stub = patch_runtime(monkeypatch, db, redis_lock=True)
     run_mock = MagicMock(side_effect=executor.subprocess.TimeoutExpired(cmd="docker", timeout=EXECUTION_TIME_LIMIT))
     monkeypatch.setattr(executor.subprocess, "run", run_mock)
 
@@ -203,7 +238,7 @@ def test_run_in_docker_writes_java_file_and_completes(monkeypatch):
         source_code='public class Main { public static void main(String[] args) { System.out.println("Hello World"); } }',
     )
     db = DummyDB([saved_execution, session])
-    redis_mock = patch_runtime(monkeypatch, db, redis_lock=True)
+    redis_mock, _cache_stub = patch_runtime(monkeypatch, db, redis_lock=True)
     makedirs_mock = MagicMock()
     monkeypatch.setattr(executor.os, "makedirs", makedirs_mock)
     run_mock = MagicMock(
@@ -239,7 +274,7 @@ def test_run_in_docker_marks_failed_when_java_compile_fails(monkeypatch):
     saved_execution = make_execution()
     session = make_session(language="java", source_code="public class Main {")
     db = DummyDB([saved_execution, session])
-    redis_mock = patch_runtime(monkeypatch, db, redis_lock=True)
+    redis_mock, _cache_stub = patch_runtime(monkeypatch, db, redis_lock=True)
     monkeypatch.setattr(executor.os, "makedirs", MagicMock())
     run_mock = MagicMock(
         return_value=SimpleNamespace(
@@ -263,6 +298,30 @@ def test_run_in_docker_marks_failed_when_java_compile_fails(monkeypatch):
     assert saved_execution.stderr == "Main.java:1: error: reached end of file while parsing"
     assert saved_execution.execution_time_ms == 250
     assert saved_execution.failed_at is not None
+    assert redis_mock.delete.call_count == 1
+
+
+def test_run_in_docker_uses_cached_session_snapshot_when_present(monkeypatch):
+    saved_execution = make_execution()
+    session = make_session(language="python", source_code="print('stale')")
+    db = DummyDB([saved_execution, session])
+    redis_mock, cache_stub = patch_runtime(monkeypatch, db, redis_lock=True)
+    cache_stub.get_session.return_value = {
+        "session_id": "session-1",
+        "language": "python",
+        "source_code": "print('fresh from redis')",
+    }
+    run_mock = MagicMock(
+        return_value=SimpleNamespace(stdout="fresh from redis\n", stderr="", returncode=0)
+    )
+    monkeypatch.setattr(executor.subprocess, "run", run_mock)
+    time_mock = MagicMock(side_effect=[40.0, 40.100])
+    monkeypatch.setattr(executor.time, "time", time_mock)
+
+    executor.run_in_docker("execution-id")
+
+    assert run_mock.call_args.args[0][-1] == "print('fresh from redis')"
+    assert saved_execution.status == ExecutionStatus.COMPLETED
     assert redis_mock.delete.call_count == 1
 
 

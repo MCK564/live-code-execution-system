@@ -9,3 +9,7 @@ pytest
 httpx
 pydantic-settings
 alembic
+tree-sitter
+tree-sitter-java
+tree-sitter-cpp
+websockets
