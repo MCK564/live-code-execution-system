@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 
 from core.redis_client import redis_client
+from services.redis_service import consume_auth_code_atomic, set_auth_code
 
 
 SESSION_SYNC_ENQUEUE_TTL_SECONDS = 60
-
 
 def _session_key(session_id: str) -> str:
     return f"session:{session_id}:latest"
@@ -25,7 +25,6 @@ def set_session(session_id: str, payload: dict) -> None:
         return
     redis_client.set(_session_key(session_id), json.dumps(payload))
 
-
 def get_session(session_id: str) -> dict | None:
     if not cache_is_available():
         return None
@@ -34,7 +33,6 @@ def get_session(session_id: str) -> dict | None:
     if not raw:
         return None
     return json.loads(raw)
-
 
 def delete_session(session_id: str) -> None:
     if not cache_is_available():

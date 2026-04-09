@@ -1,9 +1,9 @@
-# Live Code Execution and Analysis System
+# Live Code Execution, Analysis, and OAuth2 Auth System
 
 This repository contains a Dockerized live-coding platform with:
 
 - a React + Vite frontend packaged behind Nginx
-- a FastAPI backend for sessions, execution, and code analysis
+- a FastAPI backend for sessions, execution, code analysis, and Google OAuth2 login
 - PostgreSQL as the source of truth
 - Redis + RQ for async execution and session-sync jobs
 - a worker that runs learner code inside isolated Docker containers
@@ -18,13 +18,15 @@ This repository contains a Dockerized live-coding platform with:
   - [4.2 Autosave Flow](#42-autosave-flow)
   - [4.3 Execution Flow](#43-execution-flow)
   - [4.4 Analyzer Flow](#44-analyzer-flow)
+  - [4.5 OAuth2 Login Flow](#45-oauth2-login-flow)
 - [5. Frontend Behavior](#5-frontend-behavior)
 - [6. API Surface](#6-api-surface)
   - [6.1 Session Endpoints](#61-session-endpoints)
   - [6.2 Execution Endpoints](#62-execution-endpoints)
   - [6.3 Analyzer Endpoints](#63-analyzer-endpoints)
-  - [6.4 Example Analyzer Result](#64-example-analyzer-result)
-  - [6.5 Example Analyzer WebSocket Message](#65-example-analyzer-websocket-message)
+  - [6.4 Auth Endpoints](#64-auth-endpoints)
+  - [6.5 Example Analyzer Result](#65-example-analyzer-result)
+  - [6.6 Example Analyzer WebSocket Message](#66-example-analyzer-websocket-message)
 - [7. Supported Languages](#7-supported-languages)
   - [7.1 Execution](#71-execution)
   - [7.2 Analysis](#72-analysis)
@@ -52,11 +54,12 @@ This repository contains a Dockerized live-coding platform with:
 
 ## 1. Current System Summary
 
-The current system supports three main capabilities:
+The current system supports four main capabilities:
 
 1. Session editing with Redis-backed autosave and eventual DB sync
 2. Asynchronous code execution for `python`, `java`, and `cpp`
 3. Static code analysis for `python`, `java`, and `cpp`, exposed via both HTTP and WebSocket
+4. Google OAuth2 login with JWT access token, JWT refresh token, and Redis-backed one-time code exchange
 
 The frontend is now part of the Docker Compose stack and is served on `http://localhost:3000`. It proxies both REST and WebSocket traffic under `/api` to the FastAPI backend.
 
@@ -102,8 +105,12 @@ Execution status + stdout/stderr persisted to PostgreSQL
 - Session API: `app/api/code_session.py`
 - Execution API: `app/api/execution.py`
 - Analyzer API: `app/api/analyzer.py`
+- Auth API: `app/api/auth.py`
 - Session service: `app/services/code_session.py`
 - Execution service: `app/services/execution.py`
+- JWT service: `app/services/jwt_service.py`
+- OAuth authorization service: `app/services/oauth_authorize_service.py`
+- Auth Redis service: `app/services/redis_service.py`
 - Execution worker logic: `app/utils/executor.py`
 - Redis helpers: `app/utils/redis.py`
 - Analyzer engine: `app/analysis/*`
@@ -156,6 +163,23 @@ The current frontend uses the WebSocket path:
 4. The backend runs the analyzer and returns `analyze.result`.
 5. The UI ignores stale versions and only renders the latest result.
 
+### 4.5 OAuth2 Login Flow
+
+The Google login flow uses authorization code + a backend-issued one-time exchange code:
+
+1. The client calls `GET /auth/oauth2/google/authorize`.
+2. FastAPI validates the frontend redirect against an allowlist and generates a short-lived JWT `state`.
+3. The browser is redirected to Google OAuth.
+4. Google redirects back to `GET /auth/oauth2/google/callback?code=...&state=...`.
+5. FastAPI validates the `state`, exchanges the Google code, fetches Google user info, and simulates user provisioning.
+6. FastAPI creates:
+   - a short-lived JWT access token
+   - a long-lived JWT refresh token with `jti`
+7. The token pair is stored in Redis behind a random one-time code with a 60-second TTL.
+8. FastAPI redirects the browser to the frontend success URL with `?code=<one-time-code>`.
+9. The frontend calls `POST /auth/oauth2/exchange`.
+10. FastAPI atomically consumes the code with Redis `GETDEL`, returns the access token in JSON, and sets the refresh token as an `HttpOnly` cookie.
+
 ## 5. Frontend Behavior
 
 The React UI provides:
@@ -172,6 +196,14 @@ The React UI provides:
   - expandable detail and fix text
 
 The analyzer tab is backed by WebSocket, not HTTP polling.
+
+For authentication, the intended frontend flow is:
+
+- redirect the browser to `/auth/oauth2/google/authorize`
+- read the `code` query parameter on the login success page
+- call `POST /auth/oauth2/exchange`
+- store only the access token in frontend memory
+- rely on the `HttpOnly` refresh-token cookie for rotation via `POST /auth/refresh`
 
 ## 6. API Surface
 
@@ -212,7 +244,18 @@ Base URLs:
 - `WS /analyzer/ws/{session_id}`
   - Live analysis channel with `ping`, `pong`, `analyze.request`, `analyze.result`, and `analyze.error`.
 
-### 6.4 Example Analyzer Result
+### 6.4 Auth Endpoints
+
+- `GET /auth/oauth2/google/authorize`
+  - Redirect to Google OAuth with JWT `state`, `openid email profile`, `access_type=offline`, and `prompt=consent`.
+- `GET /auth/oauth2/google/callback`
+  - Validate `state`, exchange the Google code, fetch the Google profile, create access/refresh JWTs, store them behind a one-time Redis code, and redirect to the frontend with that code only.
+- `POST /auth/oauth2/exchange`
+  - Consume the one-time Redis code atomically and return the access token while setting the refresh token as an `HttpOnly` cookie.
+- `POST /auth/refresh`
+  - Verify the refresh cookie, check the refresh-token `jti` in Redis, rotate the refresh token, and return a new access token.
+
+### 6.5 Example Analyzer Result
 
 ```json
 {
@@ -236,7 +279,7 @@ Base URLs:
 }
 ```
 
-### 6.5 Example Analyzer WebSocket Message
+### 6.6 Example Analyzer WebSocket Message
 
 Request:
 
@@ -348,6 +391,10 @@ Redis is used for more than just queueing:
    - `session:{session_id}:sync-enqueued`
 4. Per-session execution lock
    - `lock:session:{session_id}`
+5. OAuth one-time code exchange
+   - `auth:code:{uuid}`
+6. Refresh-token session tracking
+   - `auth:refresh:{jti}`
 
 ## 10. Reliability and Safety Controls
 
@@ -361,6 +408,7 @@ Redis is used for more than just queueing:
 - Timestamped execution lifecycle transitions
 - Redis snapshot applied before execution so worker uses the latest code
 - Runtime image preflight check to fail fast when images are missing locally
+- OAuth refresh token rotation backed by Redis `jti` tracking
 
 ### 10.2 Execution Safety
 
@@ -375,6 +423,14 @@ The Python execution path uses:
 - `--rm`
 
 The compiled-language path (`java`, `cpp`) also uses container isolation and a shared Docker volume workspace, but it skips `--read-only` because source files and build artifacts must be written inside the mounted workspace.
+
+Auth-specific controls now in place:
+
+- OAuth `state` is a short-lived JWT to protect against CSRF on callback.
+- Frontend redirects are validated against an explicit allowlist to block open redirects.
+- Access and refresh tokens are never returned in the browser redirect URL.
+- One-time exchange codes are random UUIDs with 60-second TTL and single-use Redis `GETDEL`.
+- Refresh tokens are delivered only through an `HttpOnly` cookie.
 
 ## 11. Dockerized Services
 
@@ -466,6 +522,13 @@ Backend environment variables are loaded from `app/.env`:
 
 - `DATABASE_URL=postgresql+psycopg2://admin:123456@postgres:5432/code_execution`
 - `REDIS_URL=redis://redis:6379/0`
+- `GOOGLE_CLIENT_ID=...`
+- `GOOGLE_CLIENT_SECRET=...`
+- `GOOGLE_REDIRECT_URI=http://localhost:8001/auth/oauth2/google/callback`
+- `AUTH_FRONTEND_SUCCESS_REDIRECT_URI=http://localhost:3000/login/success`
+- `AUTH_REDIRECT_ALLOWLIST=http://localhost:3000/login/success,http://localhost:5173/login/success`
+- `BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:5173`
+- `AUTH_COOKIE_SECURE=false` for local HTTP development only
 
 ### 13.2 Frontend
 
@@ -473,19 +536,17 @@ The frontend uses `VITE_API_BASE_URL` if provided; otherwise it defaults to `/ap
 
 In development, `UI/vite.config.js` proxies `/api` to `http://localhost:8001` and also allows WebSocket proxying for the analyzer channel.
 
+If the frontend runs on a separate origin such as `http://localhost:5173`, requests that need refresh-cookie support must include credentials.
+
 ## 14. Verification Status
 
-The current repository was re-checked against the implementation and verified with:
+Verification commands for the current repository:
 
 - Backend tests:
 
 ```bash
 python -m pytest -q -p no:cacheprovider test
 ```
-
-Result:
-
-- `18 passed in 2.32s`
 
 - Frontend production build:
 
@@ -494,19 +555,11 @@ cd UI
 npm run build
 ```
 
-Result:
-
-- Vite production build succeeds
-
 - Dockerized UI build:
 
 ```bash
 docker compose build ui
 ```
-
-Result:
-
-- UI image builds successfully
 
 - Packaged UI availability:
 
@@ -515,19 +568,16 @@ docker compose up -d ui
 curl -I http://localhost:3000
 ```
 
-Result:
-
-- Nginx responds with `200 OK`
-
 - Analyzer WebSocket through packaged UI:
 
 ```text
 ws://localhost:3000/api/analyzer/ws/workspace-live-analysis
 ```
 
-Result:
-
-- WebSocket handshake and `analyze.result` were verified through the Nginx proxy
+- OAuth2 backend tests are included in:
+  - `test/test_auth_services.py`
+  - `test/test_auth_api.py`
+- OAuth2 manual verification requires valid Google OAuth credentials and a redirect URL included in both Google Console and `AUTH_REDIRECT_ALLOWLIST`.
 
 ## 15. Known Gaps and Caveats
 
@@ -535,7 +585,8 @@ Result:
 - Schema creation uses `Base.metadata.create_all()` and does not provide full migration management. Alembic is not integrated yet.
 - The Java/C++ execution path mounts a hardcoded Docker volume name: `live-code-execution-system_shared_workspace`. If the Compose project name changes, compiled execution may need adjustment.
 - The worker requires access to the host Docker daemon via `/var/run/docker.sock`.
-- There is no authentication, authorization, or rate limiting yet.
+- Google OAuth2 login now exists, but the session/execution APIs are not yet protected by access-token dependencies.
+- There is still no rate limiting.
 - Observability is still basic; there is no metrics or tracing pipeline.
 
 ## 16. Recommended Next Improvements
@@ -544,5 +595,7 @@ Result:
 - Implement retry semantics for executions
 - Replace the hardcoded workspace volume name with a derived or configured value
 - Add integration tests against real PostgreSQL, Redis, and worker containers
-- Add authentication and per-user resource limits
+- Enforce access-token authentication on session and execution routes
+- Bind sessions and executions to a real persisted user model
+- Add per-user resource limits and rate limiting
 - Add structured metrics for queue depth, execution latency, and analyzer latency

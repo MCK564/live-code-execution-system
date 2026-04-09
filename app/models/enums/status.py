@@ -14,3 +14,8 @@ class ExecutionStatus(Enum):
 class SessionStatus(Enum):
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
+
+
+class SubmissionStatus(Enum):
+    ACCEPTED = "ACCEPTED"
+    WRONG = "WRONG"

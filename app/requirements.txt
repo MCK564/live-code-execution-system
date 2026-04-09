@@ -13,3 +13,4 @@ tree-sitter
 tree-sitter-java
 tree-sitter-cpp
 websockets
+pyjwt

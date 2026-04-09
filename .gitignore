@@ -7,7 +7,7 @@ __pycache__/
 volume/
 pytest-cache-files-i99vctzt
 pytest-cache-files-it2_g3iv
-
+project_analysis.md
 *.docx
 *.pdf
 *.so
@@ -30,6 +30,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+secrets/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

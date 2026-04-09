@@ -11,6 +11,34 @@ if str(APP_PATH) not in sys.path:
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+os.environ.setdefault(
+    "JWT_SECRET_KEY",
+    "test-secret-key-should-be-at-least-thirty-two-bytes",
+)
+os.environ.setdefault("JWT_ALGORITHM", "HS256")
+os.environ.setdefault("JWT_TTL_SECONDS", "900")
+os.environ.setdefault("JWT_REFRESH_TTL_SECONDS", "2592000")
+os.environ.setdefault("JWT_STATE_TTL_SECONDS", "300")
+os.environ.setdefault("GOOGLE_CLIENT_ID", "test-google-client-id")
+os.environ.setdefault("GOOGLE_CLIENT_SECRET", "test-google-client-secret")
+os.environ.setdefault(
+    "GOOGLE_REDIRECT_URI",
+    "http://localhost:8001/auth/oauth2/google/callback",
+)
+os.environ.setdefault(
+    "AUTH_FRONTEND_SUCCESS_REDIRECT_URI",
+    "http://localhost:3000/login/success",
+)
+os.environ.setdefault(
+    "AUTH_REDIRECT_ALLOWLIST",
+    "http://localhost:3000/login/success,http://localhost:5173/login/success",
+)
+os.environ.setdefault(
+    "BACKEND_CORS_ORIGINS",
+    "http://localhost:3000,http://localhost:5173",
+)
+os.environ.setdefault("AUTH_USER_CACHE_TTL_SECONDS", "3600")
+os.environ.setdefault("AUTH_COOKIE_SECURE", "false")
 
 
 # Test-only shim to avoid platform-specific rq import issues on Windows.
